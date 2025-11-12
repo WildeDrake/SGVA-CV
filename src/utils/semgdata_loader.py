@@ -2,7 +2,6 @@ import os
 import numpy as np
 import torch
 import torch.utils.data as data_utils
-from torchvision import datasets, transforms
 
 
 #--------------------- Cargar datos sEMG ---------------------#

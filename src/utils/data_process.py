@@ -5,7 +5,7 @@ from scipy import signal
 
 
 #--------------------- Procesamiento de datos de archivos txt a matrices numpy ---------------------#
-# leer txt
+# leer txt ya modficiado por split_dataset.py
 def txt2array(txt_path):
     """
     :param txt_path:    ruta específica de un solo archivo txt
@@ -16,18 +16,8 @@ def txt2array(txt_path):
     txt_array = txt_file.values
     return txt_array
 
-# leer txt 
-def txt2array0(txt_path):
-    """
-    :param txt_path:    ruta específica de un solo archivo txt
-    :return:            matriz preprocesada de dimensión 2 <class 'np.ndarray'> del archivo txt de entrada
-    """
-    table_file = pd.read_table(txt_path, header=None)
-    txt_file = table_file.iloc[:, :]
-    txt_array = txt_file.values
-    return txt_array
 
-# leer txt 
+# leer txt sin modificar en la carpeta all
 def txt2array_revise(txt_path):
     """
     :param txt_path:    ruta específica de un solo archivo txt
@@ -139,22 +129,19 @@ def detect_muscle_activity(emg_data):
     # return spec_vector, time, spec_values
     return index_start, index_end
 
-
 # --------------------- asignar etiquetas a los datos EMG --------------------#
 def label_indicator(path):
     label = None
-    if 'relax' in path: # mano relajada
+    if 'Fist' in path: # puño cerrado
         label = 0
-    elif 'fist' in path: # puño cerrado
+    elif 'Open' in path: # mano abierta
         label = 1
-    elif 'fingersSpread' in path: # dedos extendidos
+    elif 'Tap' in path: # toque
         label = 2
-    elif 'doubleTap' in path: # doble toque
+    elif 'WaveIn' in path: # ola hacia adentro
         label = 3
-    elif 'waveIn' in path: # ola hacia adentro
+    elif 'WaveOut' in path: # ola hacia afuera
         label = 4
-    elif 'waveOut' in path: # ola hacia afuera
-        label = 5
     return label
 
 

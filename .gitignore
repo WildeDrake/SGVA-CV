@@ -1,2 +1,6 @@
-env/    
-__pycache__/
+env/
+**/__pycache__/
+**/dataset/
+**/split_dataset/
+**/preprocessed_dataset/
+*.npy
