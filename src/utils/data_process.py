@@ -5,20 +5,8 @@ from scipy import signal
 
 
 #--------------------- Procesamiento de datos de archivos txt a matrices numpy ---------------------#
-# leer txt ya modficiado por split_dataset.py
-def txt2array(txt_path):
-    """
-    :param txt_path:    ruta específica de un solo archivo txt
-    :return:            matriz preprocesada de dimensión 2 <class 'np.ndarray'> del archivo txt de entrada
-    """
-    table_file = pd.read_table(txt_path, sep=' ', header=None)
-    txt_file = table_file.iloc[:, :]
-    txt_array = txt_file.values
-    return txt_array
-
-
 # leer txt sin modificar en la carpeta all
-def txt2array_revise(txt_path):
+def txt2array(txt_path):
     """
     :param txt_path:    ruta específica de un solo archivo txt
     :return:            matriz preprocesada de dimensión 2 <class 'np.ndarray'> del archivo txt de entrada

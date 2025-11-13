@@ -34,7 +34,7 @@ def process_split(split_name):
                 label = dp.label_indicator(gesture_folder)
                 for file in os.listdir(gesture_path):
                     file_path = os.path.join(gesture_path, file)
-                    data = dp.txt2array_revise(file_path)
+                    data = dp.txt2array(file_path)
                     data = dp.preprocessing(data)
                     start, end = dp.detect_muscle_activity(data)
                     start, end = int(start), int(end)

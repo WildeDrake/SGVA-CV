@@ -1,291 +1,310 @@
 import argparse
-import pandas as pd
+import os
+import time
+import random
 import numpy as np
+import pandas as pd
 import torch
-from torch.nn import functional as F
 import torch.optim as optim
-from torchvision.utils import save_image
 import torch.utils.data as data_utils
-
+import torch.serialization
+import matplotlib.pyplot as plt
 from model_diva import DIVA
 from utils.semgdata_loader import semgdata_load
 
+TOTAL_SUBJECTS = 12
+CROSS_SUBJECT = 2
+TRAIN_SUBJECTS = TOTAL_SUBJECTS - CROSS_SUBJECT
+GESTURES = 5
 
-#------------------------------ Training  ------------------------------#
-def train(train_loader, model, optimizer, epoch):
-    # Inicializar el modo de entrenamiento
+# ------------------------------ Utils ------------------------------ #
+def save_reconstructions(model, out_dir, x_batch, epoch, max_images=8):
+    """
+    Intenta pedir reconstrucciones al modelo y guardarlas como una imagen tipo "heatmap".
+    Si el modelo no implementa un método de reconstrucción directo, se salva el input como sanity check.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        model.eval()
+        with torch.no_grad():
+            # intentar llamados comunes (ajusta según la API real si es distinta)
+            if hasattr(model, "reconstruct"):
+                recon = model.reconstruct(x_batch.to(next(model.parameters()).device))
+            elif hasattr(model, "forward_reconstruct"):
+                recon = model.forward_reconstruct(x_batch.to(next(model.parameters()).device))
+            else:
+                # fallback: usar identity (guardamos input)
+                recon = x_batch.to(next(model.parameters()).device)
+
+            recon = recon.detach().cpu().numpy()
+    except Exception as e:
+        # si falla, guardamos input para inspección
+        recon = x_batch.detach().cpu().numpy()
+
+    # guardamos hasta max_images ejemplos
+    n = min(max_images, recon.shape[0])
+    for i in range(n):
+        arr = recon[i].squeeze()  # (1,8,52) -> (8,52) or (8,52)
+        if arr.ndim == 3:
+            arr = arr[0]  # if shape (1,8,52)
+        plt.figure(figsize=(6,2))
+        plt.imshow(arr, aspect='auto', origin='lower')
+        plt.colorbar()
+        plt.title(f'epoch{epoch}_img{i}')
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f'epoch{epoch}_img{i}.png'))
+        plt.close()
+
+
+def compute_accuracy_from_logits(pred_logits, y_onehot):
+    """
+    pred_logits: tensor (B, C) or probabilities/logits
+    y_onehot: tensor (B, C) one-hot
+    returns float accuracy (0..1)
+    """
+    pred_labels = pred_logits.argmax(dim=1)
+    true_labels = y_onehot.argmax(dim=1)
+    correct = (pred_labels == true_labels).sum().item()
+    return correct / float(pred_labels.size(0))
+
+
+# Entrenamiento por época
+def train_one_epoch(train_loader, model, optimizer, device):
     model.train()
-    train_loss = 0
-    epoch_class_y_loss = 0
-    # Bucle de datos
-    for batch_idx, (x, y, d) in enumerate(train_loader):
-        x, y, d = x.to(device), y.to(device), d.to(device)
-        # if (epoch % 50 == 0) and (batch_idx == 1):
-        #     save_reconstructions(model, d, x, y)
+    total_loss = 0.0
+    total_class_y_loss = 0.0
+    num_batches = 0
+    for (x, y, d) in train_loader:
+        x = x.to(device)
+        y = y.to(device)
+        d = d.to(device)
         optimizer.zero_grad()
         loss, class_y_loss, zd_q, zy_q, zx_q, d_target, y_target = model.loss_function(d, x, y)
         loss.backward()
         optimizer.step()
-        train_loss += loss
-        epoch_class_y_loss += class_y_loss
-    train_loss /= len(train_loader.dataset)
-    epoch_class_y_loss /= len(train_loader.dataset)
-    #  retornar las perdidas promedio por epoca
-    return train_loss, epoch_class_y_loss
+        total_loss += loss.item()
+        total_class_y_loss += class_y_loss.item() if hasattr(class_y_loss, 'item') else float(class_y_loss)
+        num_batches += 1
+    if num_batches == 0:
+        return 0.0, 0.0
+    return total_loss / num_batches, total_class_y_loss / num_batches
 
 
-# Funcion que calcula la precision de la clasificacion
-def get_accuracy(data_loader, classifier_fn, batch_size):
+def evaluate(loader, model, device):
     model.eval()
-    predictions_d, actuals_d, predictions_y, actuals_y = [], [], [], []
+    acc_y = []
+    acc_d = []
     with torch.no_grad():
-        # usar el clasificador para predecir las etiquetas de dominio y gesto
-        for (xs, ys, ds) in data_loader:
-            xs, ys, ds = xs.to(device), ys.to(device), ds.to(device)
-            # usar el clasificador para predecir las etiquetas de dominio y gesto
-            pred_d, pred_y = classifier_fn(xs)
-            predictions_d.append(pred_d)
-            actuals_d.append(ds)
-            predictions_y.append(pred_y)
-            actuals_y.append(ys)
-        # recordar el numero de predicciones correctas
-        accurate_preds_d = 0
-        for pred, act in zip(predictions_d, actuals_d):
-            for i in range(pred.size(0)):
-                v = torch.sum(pred[i] == act[i])
-                accurate_preds_d += (v.item() == 7)
-        # calcular la precision entre 0 y 1
-        accuracy_d = (accurate_preds_d * 1.0) / (len(predictions_d) * batch_size)
-        # recordar el numero de predicciones correctas
-        accurate_preds_y = 0
-        for pred, act in zip(predictions_y, actuals_y):
-            for i in range(pred.size(0)):
-                v = torch.sum(pred[i] == act[i])
-                accurate_preds_y += (v.item() == 6)
-        # calcular la precision entre 0 y 1
-        accuracy_y = (accurate_preds_y * 1.0) / (len(predictions_y) * batch_size)
-        # retornar las precisiones
-        return accuracy_d, accuracy_y
+        for (x, y, d) in loader:
+            x = x.to(device)
+            y = y.to(device)
+            d = d.to(device)
+            pred_d, pred_y = model.classifier(x)
+            # pred_y and pred_d likely logits; y,d are one-hot
+            acc_y.append(compute_accuracy_from_logits(pred_y, y))
+            acc_d.append(compute_accuracy_from_logits(pred_d, d))
+    if len(acc_y) == 0:
+        return 0.0, 0.0
+    return float(np.mean(acc_d)), float(np.mean(acc_y))
 
 
-# ------------------------------ Main  ------------------------------#
-if __name__ == "__main__":
-    # ------------------------------------------------------------------------------------------------- #
-    # Configuracion de Dispositivo
-    # ------------------------------------------------------------------------------------------------- #
-
-    # Ajuste de Entrenamiento
-    print(torch.cuda.is_available())
-    parser = argparse.ArgumentParser(description='TwoTaskVae')
-    parser.add_argument('--no-cuda', action='store_true', default=False, 
-                        help='disables CUDA training')  # false para usar cuda y true para no usar cuda
-    parser.add_argument('--seed', type=int, default=0,
-                        help='random seed (default: 1)')    # fijar la semilla aleatoria
-    parser.add_argument('--batch-size', type=int, default=1024,
-                        help='input batch size for training (default: 64)') # tamaño del batch
-    parser.add_argument('--epochs', type=int, default=500,
-                        help='number of epochs to train (default: 10)') # numero de epocas
-    parser.add_argument('--lr', type=float, default=0.01,
-                        help='learning rate (default: 0.01)')   # tasa de aprendizaje
-    parser.add_argument('--num-supervised', default=1000, type=int,
-                        help="number of supervised examples, /10 = samples per class")  # numero de ejemplos supervisados
-    # parser.add_argument('--list_train_domains', type=list, default=['s1', 's2', 's3', 's4', 's5', 's6', 's7'],
-    #                     help='domains used during training')  # dominios usados durante el entrenamiento
-    # parser.add_argument('--list_test_domain', type=str, default='s7',
-    #                     help='domain used during testing')    # dominio usado durante la prueba
-    parser.add_argument('--list_train_domains', type=list, default=[0, 1, 2, 3, 4, 5, 6, 7],
-                        help='domains used during training')    # dominios usados durante el entrenamiento
-    parser.add_argument('--list_test_domain', type=int, default=1,
-                        help='domain used during testing')  # dominio usado durante la prueba
-    
-    # Hiperparámetros del modelo:
-    parser.add_argument('--d-dim', type=int, default=7,
-                        help='number of source domain?')    # numero de dominios de origen
-    parser.add_argument('--x-dim', type=int, default=416,
-                        help='input size after flattening') # tamaño de entrada despues del aplanamiento
-    parser.add_argument('--y-dim', type=int, default=6,
-                        help='number of classes')   # Tamaño del espacio latente: 6 clases de gestos
-    parser.add_argument('--zd-dim', type=int, default=128,
-                        help='size of latent space 1')  # tamaño del espacio latente 1
-    parser.add_argument('--zx-dim', type=int, default=128,
-                        help='size of latent space 2')  # tamaño del espacio latente 2
-    parser.add_argument('--zy-dim', type=int, default=128,
-                        help='size of latent space 3')  # tamaño del espacio latente 3
-
-    # auxiliary multipliers:
-    parser.add_argument('--aux_loss_multiplier_y', type=float, default=3500.,
-                        help='multiplier for y classifier')
-    parser.add_argument('--aux_loss_multiplier_d', type=float, default=2000.,
-                        help='multiplier for d classifier')
-    
-    # Beta VAE part
-    parser.add_argument('--beta_d', type=float, default=1.,
-                        help='multiplier for KL d')
-    parser.add_argument('--beta_x', type=float, default=1.,
-                        help='multiplier for KL x')
-    parser.add_argument('--beta_y', type=float, default=1.,
-                        help='multiplier for KL y')
-
-    # Warm-up parameters
-    parser.add_argument('-w', '--warmup', type=int, default=100, metavar='N',
-                        help='number of epochs for warm-up. Set to 0 to turn warmup off.')
-    parser.add_argument('--max_beta', type=float, default=1., metavar='MB',
-                        help='max beta for warm-up')
-    parser.add_argument('--min_beta', type=float, default=0.0, metavar='MB',
-                        help='min beta for warm-up')
-    # Output path
-    parser.add_argument('--outpath', type=str, default='./',
-                        help='where to save')
-
-    # Parseo de los argumentos
-    args = parser.parse_args()
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
-    device = torch.device("cuda" if args.cuda else "cpu")
-    kwargs = {'num_workers': 1, 'pin_memory': False} if args.cuda else {}
-
-    # Set seed
+# ------------------------------ Main ------------------------------ #
+def main(args):
     torch.manual_seed(args.seed)
-    torch.backends.cudnn.benchmark = False
     np.random.seed(args.seed)
+    random.seed(args.seed)
 
-    # set work method
-    work_method = 'train'
-    # work_method = 'test'
+    device = torch.device("cuda" if (not args.no_cuda and torch.cuda.is_available()) else "cpu")
+    kwargs = {'num_workers': 4, 'pin_memory': True} if device.type == 'cuda' else {}
 
-    print(work_method)
-    # ------------------------------------------------------------------------------------------------- #
-    # train
-    # ------------------------------------------------------------------------------------------------- #
-    if work_method == 'train':
-        # repetir el experimento con diferentes semillas
-        for seed in range(10):
-            accuracy = []
-            args.seed = seed
-            print("*" * 30)
-            print('repeat{}'.format(args.seed))
-            print("*" * 30)
-            # entrenar y probar con cada sujeto como sujeto de prueba
-            for i in range(8):
-                # elegir los dominios de entrenamiento
-                args.list_test_domain = i
-                all_training_domains = [0, 1, 2, 3, 4, 5, 6, 7]
-                all_training_domains.remove(args.list_test_domain)
-                args.list_train_domains = all_training_domains
-                print("Train_Subject:", args.list_test_domain, args.list_train_domains)
-                # nombre del modelo
-                args.list_test_domain = [args.list_test_domain]
-                print(args.outpath)
-                model_name = './saved_model/' + 'less0_test_domain_' + str(
-                    args.list_test_domain[0]) + '_diva_seed_' + str(
-                    args.seed)
-                print("Test_Subject:", model_name)
-                # cargar datos supervisados
-                train_loader = data_utils.DataLoader(
-                    semgdata_load(args.list_train_domains, args.list_test_domain, args.num_supervised, args.seed,
-                                 './dataset/',
-                                 train=True),
-                    batch_size=args.batch_size,
-                    shuffle=True, **kwargs)   
-                # Inicializar el modelo DIVA
-                model = DIVA(args).to(device)
-                # Optimizer
-                optimizer = optim.Adam(model.parameters(), lr=args.lr)
-                # parametros de early stopping
-                best_loss = 10000.  # 1000
-                best_y_acc = 0.
-                early_stopping_counter = 1
-                max_early_stopping = 10
+    # Cargar info sobre cuántos sujetos hay en el split 'training'
+    training_npy = os.path.join(args.preprocessed_root, "training.npy")
+    if not os.path.exists(training_npy):
+        raise FileNotFoundError(f"{training_npy} not found. Asegúrate de haber corrido el preprocesado.")
 
-                # loop de entrenamiento
-                print('\nStart training:', args)
-                for epoch in range(1, args.epochs + 1):
-                    # hiperparametros de beta
-                    model.beta_d = 3
-                    model.beta_y = 3
-                    model.beta_x = 3
-                    # train
-                    avg_epoch_losses_sup, avg_epoch_class_y_loss = train(train_loader, model, optimizer, epoch)
-                    # reguistrar las perdidas y la precision de la clasificacion
-                    str_loss_sup = avg_epoch_losses_sup
-                    str_print = "{} epoch: avg loss {}".format(epoch, str_loss_sup) 
-                    str_print += ", class y loss {}".format(avg_epoch_class_y_loss) 
-                    # estos test de precision son solo para registro, no se usan para tomar decisiones durante el entrenamiento
-                    train_accuracy_d, train_accuracy_y = get_accuracy(train_loader, model.classifier, args.batch_size)
-                    str_print += "     train accuracy d {}".format(train_accuracy_d)  # domain classification accuracy
-                    str_print += ", y {}".format(train_accuracy_y)  # label classification accuracy
-                    str_print += ",beta_d{},y{},x{}".format(model.beta_d, model.beta_y, model.beta_x)
-                    print(str_print)
-                    # esarly stopping basado en la precision de clasificacion y
-                    if train_accuracy_y > best_y_acc:
-                        early_stopping_counter = 1
-                        best_y_acc = train_accuracy_y
-                        best_loss = avg_epoch_class_y_loss
-                        torch.save(model, model_name + '.model')
+    # leer número de sujetos
+    tmp = np.load(training_npy, allow_pickle=True).item()
+    all_data = tmp["list_total_user_data"]
+    num_subjects = len(all_data)
+    print(f"🔎 Encontrados {num_subjects} sujetos en 'training' split.")
 
-                    elif train_accuracy_y == best_y_acc:
-                        if avg_epoch_class_y_loss < best_loss:
-                            early_stopping_counter = 1
-                            best_loss = avg_epoch_class_y_loss
-                            torch.save(model, model_name + '.model')
-                        else:
-                            early_stopping_counter += 1
-                            if early_stopping_counter == max_early_stopping:
-                                break
-                    else:
-                        early_stopping_counter += 1
-                        if early_stopping_counter == max_early_stopping:
-                            break
-                # cargar datos de prueba supervisados
-                test_loader = data_utils.DataLoader(
-                    semgdata_load(args.list_train_domains, args.list_test_domain, args.num_supervised, args.seed,
-                                 './saved_model/diva',
-                                 train=False),
-                    batch_size=args.batch_size,
-                    shuffle=True, **kwargs)
-                # cargar el mejor modelo
-                model = DIVA(args).to(device)
-                model = torch.load(model_name + '.model')
-                # estos test de precision son solo para registro, no se usan para tomar decisiones durante el entrenamiento
-                test_accuracy_d, test_accuracy_y = get_accuracy(test_loader, model.classifier, args.batch_size)
-                print("test accuracy y {}".format(test_accuracy_y))
-                accuracy.append(test_accuracy_y)
-            print(args.seed, accuracy)
-    # ------------------------------------------------------------------------------------------------- #
-    # test
-    # ------------------------------------------------------------------------------------------------- #
-    if work_method == 'test':
-        acc_all_repeat = []
-        for seed in range(7):
-            args.seed = seed
-            print("*" * 30)
-            print('repeat{}'.format(args.seed))
-            acc_in_repeat = []
-            for i in range(8):
-                # elegir los dominios de entrenamiento
-                args.list_test_domain = i
-                all_training_domains = [0, 1, 2, 3, 4, 5, 6, 7]
-                all_training_domains.remove(args.list_test_domain)
-                args.list_train_domains = all_training_domains
-                print("Test_Subject:", args.list_test_domain)
-                # nombre del modelo
-                args.list_test_domain = [args.list_test_domain]
-                model_name = './saved_model/' + 'less0_test_domain_' + str(
-                    args.list_test_domain[0]) + '_diva_seed_' + str(
-                    args.seed)
-                # Cargar datos de prueba supervisados
-                test_loader = data_utils.DataLoader(
-                    semgdata_load(args.list_train_domains, args.list_test_domain, args.num_supervised, args.seed,
-                                 './dataset/',
-                                 train=False),
-                    batch_size=args.batch_size,
-                    shuffle=True, **kwargs)
-                # Cargar el mejor modelo
-                model = DIVA(args).to(device)
-                model = torch.load(model_name + '.model')
-                # estos test de precision son solo para registro, no se usan para tomar decisiones durante el entrenamiento
-                test_accuracy_d, test_accuracy_y = get_accuracy(test_loader, model.classifier, args.batch_size)
-                print("test accuracy y {}".format(test_accuracy_y))
-                acc_in_repeat.append(test_accuracy_y)
-            acc_all_repeat.append(acc_in_repeat)
-        acc_all_repeat = np.array(acc_all_repeat)
-        pd.DataFrame(acc_all_repeat).to_excel('diva_without_d.xlsx', sheet_name='0', index=False)
+    results_all_seeds = []
+
+    # Repeticiones por semilla (como en el original)
+    for seed in range(args.seed_repeats):
+        print("="*60)
+        print(f"RUN seed={seed}")
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+
+        # Guardar resultados por sujeto
+        seed_results = []
+        # Leave-One-Subject-Out (LOSO)
+        for test_idx in range(num_subjects):
+            print(f"\n--- LOSO test subject = {test_idx} ---")
+            ## 🔥 Justo antes de crear el modelo dentro del loop LOSO
+            train_subjects = [i for i in range(num_subjects) if i != test_idx]
+            test_subjects  = [test_idx]
+
+            # Ajuste dinámico del d_dim según sujetos de entrenamiento
+            args.d_dim = len(train_subjects)  # <- esto corrige el error mat1 x mat2
+
+            # DataLoaders
+            train_ds = semgdata_load(root=args.preprocessed_root, split="training", subjects=train_subjects, transform=None)
+            val_ds   = semgdata_load(root=args.preprocessed_root, split="validation", subjects=train_subjects, transform=None)
+            test_ds  = semgdata_load(root=args.preprocessed_root, split="training", subjects=test_subjects, transform=None)
+
+            train_loader = data_utils.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **kwargs)
+            val_loader   = data_utils.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, **kwargs)
+            test_loader  = data_utils.DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, **kwargs)
+
+            # Build model and optimizer
+            model = DIVA(args).to(device)
+            optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+            # Early stopping vars
+            best_val_acc = -1.0
+            best_val_loss = float('inf')
+            early_counter = 0
+            best_model_path = os.path.join(args.outdir, f"diva_seed{seed}_loso_test{test_idx}.model")
+
+            # Logging per epoch
+            logs = []
+
+            # Training loop
+            for epoch in range(1, args.epochs + 1):
+                # Warm-up betas: linear schedule from min_beta -> max_beta over args.warmup epochs
+                if args.warmup > 0 and epoch <= args.warmup:
+                    frac = epoch / float(max(1, args.warmup))
+                    model.beta_d = args.min_beta + frac * (args.max_beta - args.min_beta)
+                    model.beta_x = args.min_beta + frac * (args.max_beta - args.min_beta)
+                    model.beta_y = args.min_beta + frac * (args.max_beta - args.min_beta)
+                else:
+                    model.beta_d = args.max_beta
+                    model.beta_x = args.max_beta
+                    model.beta_y = args.max_beta
+
+                # Train epoch
+                t0 = time.time()
+                print(f"--- Epoch {epoch} ---")
+                train_loss, train_class_y_loss = train_one_epoch(train_loader, model, optimizer, device)
+                t1 = time.time()
+
+                # Evaluate on validation (and training for bookkeeping)
+                val_acc_d, val_acc_y = evaluate(val_loader, model, device)
+                train_acc_d, train_acc_y = evaluate(train_loader, model, device)
+
+                log = {
+                    "seed": seed,
+                    "test_subject": test_idx,
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "train_class_y_loss": train_class_y_loss,
+                    "train_acc_y": train_acc_y,
+                    "train_acc_d": train_acc_d,
+                    "val_acc_y": val_acc_y,
+                    "val_acc_d": val_acc_d,
+                    "time_epoch_s": t1-t0,
+                    "beta": model.beta_y
+                }
+                logs.append(log)
+
+                # Print progress
+                print(f"[s{seed} t{test_idx}] epoch {epoch:03d} | tr_acc_y {train_acc_y:.4f} val_acc_y {val_acc_y:.4f} | tr_loss {train_loss:.4f} | beta {model.beta_y:.3f}")
+
+                # Save reconstructions occasionally
+                if epoch % args.recon_every == 0:
+                    try:
+                        save_reconstructions(model, out_dir=os.path.join(args.outdir, "recons", f"seed{seed}_test{test_idx}"), x_batch=next(iter(train_loader))[0], epoch=epoch, max_images=6)
+                    except Exception as e:
+                        # no block on errors here
+                        print("⚠️ save_reconstructions failed:", e)
+
+                # Early stopping & checkpointing based on val accuracy (y)
+                # prefer higher val_acc_y; if tie, smaller val loss
+                if val_acc_y > best_val_acc or (val_acc_y == best_val_acc and train_class_y_loss < best_val_loss):
+                    best_val_acc = val_acc_y
+                    best_val_loss = train_class_y_loss
+                    early_counter = 0
+                    # save model
+                    torch.save(model.state_dict(), best_model_path)
+                    print(f"✅ New best model saved (val_acc_y={best_val_acc:.4f}) -> {best_model_path}")
+                else:
+                    early_counter += 1
+                    if early_counter >= args.early_stop_patience:
+                        print(f"⏱ Early stopping triggered (no improv for {args.early_stop_patience} epochs)")
+                        break
+
+
+            # After training -> load best model (if exists)
+            if os.path.exists(best_model_path):
+                model.load_state_dict(torch.load(best_model_path, map_location=device))
+            else:
+                print("⚠️ Best model not found, using last model from training.")
+
+            # Evaluate on test subjec
+            model.eval()
+            test_acc_d, test_acc_y = evaluate(test_loader, model, device)
+            print(f"*** Final test accuracy (subject {test_idx}) - y: {test_acc_y:.4f}, d: {test_acc_d:.4f}")
+
+            # Save per-subject logs to Excel
+            df_logs = pd.DataFrame(logs)
+            out_xls = os.path.join(args.outdir, f"logs_seed{seed}_test{test_idx}.xlsx")
+            df_logs.to_excel(out_xls, index=False)
+            print(f"📄 Saved per-epoch logs to {out_xls}")
+
+            seed_results.append({
+                "seed": seed,
+                "test_subject": test_idx,
+                "test_acc_y": test_acc_y,
+                "test_acc_d": test_acc_d,
+                "best_val_acc_y": best_val_acc,
+                "best_val_loss": best_val_loss,
+                "n_epochs_trained": epoch
+            })
+
+        # Save seed summary
+        df_seed = pd.DataFrame(seed_results)
+        out_seed_xls = os.path.join(args.outdir, f"summary_seed{seed}.xlsx")
+        df_seed.to_excel(out_seed_xls, index=False)
+        print(f"📄 Saved LOSO seed summary to {out_seed_xls}")
+        results_all_seeds.append(seed_results)
+
+    # Save final aggregated results
+    all_df = pd.DataFrame([item for seed_res in results_all_seeds for item in seed_res])
+    all_xls = os.path.join(args.outdir, "final_loso_results.xlsx")
+    all_df.to_excel(all_xls, index=False)
+    print(f"\n🏁 LOSO experiment finished. Final results saved to {all_xls}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--no-cuda', action='store_true', default=False)
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seed-repeats', type=int, default=3, help="cuántas repeticiones con distintas seeds (original=10)")
+    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--epochs', type=int, default=1)
+    parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--outdir', type=str, default='./saved_model')
+    parser.add_argument('--preprocessed-root', type=str, default='./preprocessed_dataset', help="carpeta con training.npy, validation.npy, testing.npy, cross_subject.npy")
+    parser.add_argument('--d-dim', type=int, default=TRAIN_SUBJECTS)
+    parser.add_argument('--y-dim', type=int, default=GESTURES)
+    parser.add_argument('--zd-dim', type=int, default=128)
+    parser.add_argument('--zx-dim', type=int, default=128)
+    parser.add_argument('--x-dim', type=int, default=416, help='dimensión total de entrada (por ejemplo 8*52)')
+    parser.add_argument('--zy-dim', type=int, default=128)
+    parser.add_argument('--aux_loss_multiplier_y', type=float, default=3500.)
+    parser.add_argument('--aux_loss_multiplier_d', type=float, default=2000.)
+    parser.add_argument('--beta_d', type=float, default=1.)
+    parser.add_argument('--beta_x', type=float, default=1.)
+    parser.add_argument('--beta_y', type=float, default=1.)
+    parser.add_argument('--warmup', type=int, default=100)
+    parser.add_argument('--min_beta', type=float, default=0.0)
+    parser.add_argument('--max_beta', type=float, default=3.0)
+    parser.add_argument('--recon_every', type=int, default=20, help="guardar reconstructions cada N epochs")
+    parser.add_argument('--early_stop_patience', type=int, default=10)
+    args = parser.parse_args()
+
+    os.makedirs(args.outdir, exist_ok=True)
+    main(args)

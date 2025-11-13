@@ -4,114 +4,59 @@ import torch
 import torch.utils.data as data_utils
 
 
-#--------------------- Cargar datos sEMG ---------------------#
+# Carga datos sEMG preprocesados desde archivos .npy
 class semgdata_load(data_utils.Dataset):
-    # Contructor
-    def __init__(self, list_train_domains, list_test_domain, num_supervised, mnist_subset, root, transform=None,
-                 train=True, download=True):
-        self.list_train_domains = list_train_domains
-        self.list_test_domain = list_test_domain
-        self.num_supervised = num_supervised
-        self.mnist_subset = mnist_subset
+    """
+    root: Ruta a la carpeta que contiene los archivos preprocesados (.npy)
+    split: Permite seleccionar splits ('training', 'validation', 'testing', 'cross_subject')
+    y elegir qué sujetos cargar (útil para Leave-One-Subject-Out o cross-subject holdout).
+    subjects: Lista de índices de sujetos a cargar. Si None, se cargan todos.
+    transform: Transformaciones adicionales a aplicar a los datos.
+    """
+    def __init__(self, root, split="training", subjects=None, transform=None):
         self.root = os.path.expanduser(root)
+        self.split = split
+        self.subjects = subjects
         self.transform = transform
-        self.train = train
-        self.download = download
-        # cargar datos de entrenamiento o prueba
-        if self.train:
-            self.train_data, self.train_labels, self.train_domain = self._get_data()
-        else:
-            self.test_data, self.test_labels, self.test_domain = self._get_data()
+        # Cargar archivo .npy correspondiente
+        data_path = os.path.join(self.root, f"{split}.npy")
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"No se encontró el archivo {data_path}")
+        # Cargar datos
+        dataset = np.load(data_path, allow_pickle=True).item()
+        all_data = dataset["list_total_user_data"]
+        all_labels = dataset["list_total_user_labels"]
+        # Si se especifican sujetos, filtrar
+        if subjects is not None:
+            all_data = [all_data[i] for i in subjects]
+            all_labels = [all_labels[i] for i in subjects]
+        # Concatenar todos los sujetos seleccionados
+        self.data = np.concatenate(all_data)
+        self.labels = np.concatenate(all_labels)
+        # Crear etiquetas de dominio (sujeto)
+        self.domains = []
+        for i, subj_labels in enumerate(all_labels):
+            self.domains.extend([i] * len(subj_labels))
+        self.domains = np.array(self.domains)
+        # Convertir a tensores
+        self.data = torch.tensor(self.data, dtype=torch.float32).unsqueeze(1)  # (N,1,8,52)
+        self.labels = torch.tensor(self.labels, dtype=torch.long)
+        self.domains = torch.tensor(self.domains, dtype=torch.long)
+        # Convertir etiquetas y dominios a one-hot
+        num_classes = self.labels.max().item() + 1
+        num_domains = len(all_data)
+        self.labels = torch.eye(num_classes)[self.labels]
+        self.domains = torch.eye(num_domains)[self.domains]
 
-    # retorna los datos y las etiquetas
-    def _get_data(self):
-        """
-        return
-        train_data      n * 1*8*52
-        train_label     n * num_class
-        train_domains   n * num_domain
-        """
-        # cargar datos para entrenamiento o prueba
-        if self.train:
-            train_data_label_dict = np.load("./../dataset/8subs_6motions_5repeats_sEMG.npy",
-                                        encoding="bytes", allow_pickle=True).item()
-            original_train_data = train_data_label_dict["list_total_user_data"]
-            original_train_label = train_data_label_dict['list_total_user_labels']
-            new_train_data=[]
-            new_train_label=[]
-            # agregar datos de los sujetos de entrenamiento
-            for i in self.list_train_domains:
-                new_train_data.append(original_train_data[i])
-                new_train_label.append(original_train_label[i])
-            # combinar datos de los sujetos
-            train_data = np.concatenate(new_train_data)
-            train_label = np.concatenate(new_train_label)
-            train_data = np.array(train_data, dtype=np.float32)
-            # Crear etiquetas de dominio
-            train_domains = torch.zeros(len(train_label))
-            sum = 0
-            for i in range(len(new_train_label)):
-                length = len(new_train_label[i])
-                train_domains[sum:sum + length] += i
-                sum += length
-            # Mezclar los datos
-            inds = np.arange(len(train_label))
-            np.random.shuffle(inds)
-            train_data = torch.tensor(train_data[inds])
-            train_label = torch.tensor(train_label[inds]).long()    # Etiquetas de clase
-            train_domains = train_domains[inds].long()  # Etiquetas de dominio
-            # Convertir a onehot
-            d = torch.eye(7)  # Crear matriz diagonal
-            train_domains = d[train_domains]  # Cada elemento en train_domains es reemplazado por la fila correspondiente en 
-                                              # la matriz diagonal según su valor original (que representa el dominio)
-            # Convertir a onehot
-            y = torch.eye(6)
-            train_label = y[train_label]
-
-            return train_data.unsqueeze(1), train_label, train_domains  # (46475,1,8,52) (46475,7)  (46475,7)
-
-        # Cargar datos de prueba
-        else:
-            train_data_label_dict = np.load("./../dataset/8subs_6motions_35repeats_sEMG.npy",
-                                       encoding="bytes", allow_pickle=True).item()
-            original_train_data = train_data_label_dict["list_total_user_data"]
-            original_train_label = train_data_label_dict['list_total_user_labels']
-            original_train_data = original_train_data[self.list_test_domain[0]]
-            original_train_label = original_train_label[self.list_test_domain[0]]
-            # original_train_data = original_train_data.tolist()[self.list_test_domain[0]]
-            # original_train_label = original_train_label.tolist()[self.list_test_domain[0]]
-            train_data = torch.tensor(np.array(original_train_data, dtype=np.float32))
-            train_label = torch.tensor(original_train_label).long()
-            # Crear etiquetas de dominio
-            train_domains = torch.zeros(len(train_label)).long()
-            # Convertir a onehot
-            d = torch.eye(7)  # Crear matriz diagonal
-            train_domains = d[train_domains]  # Cada elemento en train_domains es reemplazado por la fila correspondiente en
-            # la matriz diagonal según su valor original (que representa el dominio)
-            # Convertir a onehot
-            y = torch.eye(6)
-            train_label = y[train_label]
-            # Retornar datos de prueba
-            return train_data.unsqueeze(1), train_label, train_domains
-
-    # Obtener la longitud del conjunto de datos
+    # Longitud del dataset
     def __len__(self):
-        if self.train:
-            return len(self.train_labels)
-        else:
-            return len(self.test_labels)
+        return len(self.labels)
 
-    # Obtener un elemento del conjunto de datos
+    # Obtener muestra
     def __getitem__(self, index):
-        if self.train:
-            x = self.train_data[index]
-            y = self.train_labels[index]
-            d = self.train_domain[index]
-        else:
-            x = self.test_data[index]
-            y = self.test_labels[index]
-            d = self.test_domain[index]
-
+        x = self.data[index]
+        y = self.labels[index]
+        d = self.domains[index]
         if self.transform is not None:
             x = self.transform(x)
         return x, y, d
