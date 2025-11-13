@@ -5,16 +5,16 @@ import numpy as np
 import torch
 import torch.optim as optim
 from model_diva import DIVA
-from utils.semgdata_loader import semgdata_load, load_split
+from utils.semgdata_loader import load_split
 
-
+ROOT_preprocessed = "./preprocessed_dataset"
 TOTAL_SUBJECTS = 12
 CROSS_SUBJECT = 2
 TRAIN_SUBJECTS = TOTAL_SUBJECTS - CROSS_SUBJECT
-TOTAL_GESTURES = 5
+TOTAL_GESTURES = 6
+MODO = "train"  # 'train' o 'cross'
 
 # ------------------------------ Utils ------------------------------ #
-# Función de entrenamiento por época
 def train_one_epoch(train_loader, model, optimizer, device):
     model.train()
     total_loss = 0.0
@@ -30,14 +30,12 @@ def train_one_epoch(train_loader, model, optimizer, device):
     n_batches = len(train_loader)
     return total_loss / n_batches, total_class_y_loss / n_batches
 
-# Función para calcular accuracy
 def compute_accuracy_from_logits(pred_logits, y_onehot):
     pred_labels = pred_logits.argmax(dim=1)
     true_labels = y_onehot.argmax(dim=1)
     correct = (pred_labels == true_labels).sum().item()
     return correct / float(pred_labels.size(0))
 
-# Función de evaluación
 def evaluate(loader, model, device):
     model.eval()
     acc_y, acc_d = [], []
@@ -56,28 +54,34 @@ def main(args):
     np.random.seed(args.seed)
     random.seed(args.seed)
     device = torch.device("cuda" if (not args.no_cuda and torch.cuda.is_available()) else "cpu")
-    kwargs = {'num_workers': 4, 'pin_memory': True} if device.type == 'cuda' else {}
 
-    # ------------------------------ DataLoaders ------------------------------ #
-    ROOT = "./preprocessed_dataset"
-    train_loader = load_split(ROOT, "training", batch_size=args.batch_size)
-    val_loader = load_split(ROOT, "validation", batch_size=args.batch_size)
-    test_loader = load_split(ROOT, "testing", batch_size=args.batch_size)
-    cross_subject_loader = load_split(ROOT, "cross_subject", batch_size=args.batch_size)
+    # ---------------- DataLoaders ---------------- #
+    train_loader = load_split(ROOT_preprocessed, "training", batch_size=args.batch_size, shuffle=True)
+    val_loader = load_split(ROOT_preprocessed, "validation", batch_size=args.batch_size, shuffle=False)
+    test_loader = load_split(ROOT_preprocessed, "testing", batch_size=args.batch_size, shuffle=False)
+    cross_loader = load_split(ROOT_preprocessed, "cross_subject", batch_size=args.batch_size, shuffle=False)
     
-    # ------------------------------ Modelo y optimizador ------------------------------ #
+    # ---------------- Modelo y optimizador ---------------- #
     model = DIVA(args).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    # Cargar modelo pre-entrenado si se pasa
+    if args.pretrained_model is not None:
+        print(f"Loading pretrained model from {args.pretrained_model}")
+        model.load_state_dict(torch.load(args.pretrained_model, map_location=device))
+    # ---------------- Carpetas de checkpoints ---------------- #
+    checkpoint_dir = os.path.join(args.outpath, "checkpoints_models")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    best_model_path = os.path.join(args.outpath, f"diva_best_seed{args.seed}.model")
 
-    # ------------------------------ Early stopping ------------------------------ #
+    # ---------------- Early stopping ---------------- #
     best_y_acc = 0.0
     best_loss = float('inf')
     early_counter = 0
-    model_name = os.path.join(args.outpath, f"diva_cross_subject_seed{args.seed}.model")
 
-    # ------------------------------ Entrenamiento ------------------------------ #
+    # ---------------- Entrenamiento ---------------- #
     for epoch in range(1, args.epochs + 1):
-        print(f"Epoch {epoch}/{args.epochs}")
+        print(f"\nEpoch {epoch}/{args.epochs}")
+
         # Warm-up beta
         if args.warmup > 0 and epoch <= args.warmup:
             frac = epoch / args.warmup
@@ -89,26 +93,48 @@ def main(args):
             model.beta_x = args.max_beta
             model.beta_y = args.max_beta
 
-        train_loss, class_y_loss = train_one_epoch(train_loader, model, optimizer, device)
-        acc_d, acc_y = evaluate(train_loader, model, device)
-        print(f"Epoch {epoch}: train_loss={train_loss:.4f}, class_y_loss={class_y_loss:.4f}, acc_y={acc_y:.4f}")
-
-        if acc_y > best_y_acc or (acc_y == best_y_acc and class_y_loss < best_loss):
-            best_y_acc = acc_y
-            best_loss = class_y_loss
-            early_counter = 0
-            torch.save(model.state_dict(), model_name)
-            print(f"✅ New best model saved with acc_y={best_y_acc:.4f}")
+        # Selecciona loader según modo
+        if args.mode == "train":
+            current_loader = train_loader
+        elif args.mode == "cross":
+            current_loader = cross_loader
         else:
-            early_counter += 1
-            if early_counter >= args.early_stop_patience:
-                print(f"⏱ Early stopping triggered at epoch {epoch}")
-                break
+            raise ValueError("mode debe ser 'train' o 'cross'")
 
-    # ------------------------------ Evaluación cross-subject ------------------------------ #
-    model.load_state_dict(torch.load(model_name, map_location=device))
+        train_loss, class_y_loss = train_one_epoch(current_loader, model, optimizer, device)
+        print(f"Train - loss: {train_loss:.4f}, class_y_loss: {class_y_loss:.4f}")
+
+        # Validación solo en modo 'train' para early stopping
+        if args.mode == "train":
+            acc_d_val, acc_y_val = evaluate(val_loader, model, device)
+            print(f"Validation - acc_y: {acc_y_val:.4f}, acc_d: {acc_d_val:.4f}")
+
+            if acc_y_val > best_y_acc or (acc_y_val == best_y_acc and class_y_loss < best_loss):
+                best_y_acc = acc_y_val
+                best_loss = class_y_loss
+                early_counter = 0
+                torch.save(model.state_dict(), best_model_path)
+                print(f"New best model saved with acc_y={best_y_acc:.4f}")
+            else:
+                early_counter += 1
+                if early_counter >= args.early_stop_patience:
+                    print(f"Early stopping triggered at epoch {epoch}")
+                    break
+
+        # Checkpoint por época
+        if epoch % 8 == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"{args.mode}_epoch{epoch}_seed{args.seed}.pt")
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"Checkpoint saved: {checkpoint_path}")
+
+    # ---------------- Test final ---------------- #
+    model.load_state_dict(torch.load(best_model_path if args.mode=="train" else checkpoint_path, map_location=device))
     test_acc_d, test_acc_y = evaluate(test_loader, model, device)
-    print(f"\n🏁 Cross-subject test accuracy - y: {test_acc_y:.4f}, d: {test_acc_d:.4f}")
+    print(f"\nTest accuracy - y: {test_acc_y:.4f}, d: {test_acc_d:.4f}")
+
+    # ---------------- Cross-subject evaluación ---------------- #
+    cross_acc_d, cross_acc_y = evaluate(cross_loader, model, device)
+    print(f"\nCross-subject accuracy - y: {cross_acc_y:.4f}, d: {cross_acc_d:.4f}")
 
 # ------------------------------ Argparse ------------------------------ #
 if __name__ == "__main__":
@@ -116,9 +142,12 @@ if __name__ == "__main__":
     parser.add_argument('--no-cuda', action='store_true', default=False)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--outpath', type=str, default='./saved_model')
+    parser.add_argument('--pretrained-model', type=str, default=None,
+                    help="Ruta a un modelo pre-entrenado para continuar entrenamiento / fine-tuning")
+    parser.add_argument('--mode', type=str, default=MODO, choices=['train', 'cross'], help="Modo de entrenamiento")
     parser.add_argument('--d-dim', type=int, default=TRAIN_SUBJECTS)
     parser.add_argument('--x-dim', type=int, default=416)
     parser.add_argument('--y-dim', type=int, default=TOTAL_GESTURES)

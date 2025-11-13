@@ -4,5 +4,4 @@ dataset/
 **/split_dataset/
 **/preprocessed_dataset/
 *.npy 
-saved_models/
-logs/
+checkpoints_models/

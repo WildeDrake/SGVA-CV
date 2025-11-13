@@ -14,7 +14,7 @@ class semgdata_load(data_utils.Dataset):
     subjects: Lista de índices de sujetos a cargar. Si None, se cargan todos.
     transform: Transformaciones adicionales a aplicar a los datos.
     """
-    def __init__(self, root, split="training", subjects=None, transform=None):
+    def __init__(self, root, split="training", subjects=None, transform=None, shuffle=False):
         self.root = os.path.expanduser(root)
         self.split = split
         self.subjects = subjects
@@ -31,6 +31,12 @@ class semgdata_load(data_utils.Dataset):
         if subjects is not None:
             all_data = [all_data[i] for i in subjects]
             all_labels = [all_labels[i] for i in subjects]
+        if shuffle:
+            # Mezclar los datos de cada sujeto
+            for i in range(len(all_data)):
+                perm = np.random.permutation(len(all_data[i]))
+                all_data[i] = all_data[i][perm]
+                all_labels[i] = all_labels[i][perm]
         # Concatenar todos los sujetos seleccionados
         self.data = np.concatenate(all_data)
         self.labels = np.concatenate(all_labels)
@@ -63,9 +69,9 @@ class semgdata_load(data_utils.Dataset):
         return x, y, d
 
 # Funcion para cargar un split
-def load_split(root, split, batch_size=128):
+def load_split(root, split, batch_size=128, shuffle=False):
     dataset = semgdata_load(root=root, split=split)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=(split == "training"))
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
     # Obtener un batch de ejemplo
     x, y, d = next(iter(dataloader))
     assert isinstance(x, torch.Tensor)
