@@ -20,14 +20,14 @@ def split_subject_data(subject_path, subject_name, OUTPUT_DIR, cross_subject=Fal
     else:
         subsets_to_create = ["training", "validation", "testing"]
 
-    # Limpiar
+    # Limpiar carpeta de salida si existe
     for subset in subsets_to_create:
         subset_dir = os.path.join(out_subject_dir, subset)
         if os.path.exists(subset_dir):
             shutil.rmtree(subset_dir)
 
     # Primero hacer SPLIT SOLO DESDE ALL
-    all_splits = {}  # dict[(hand, gesture)] = {train:[], val:[], test:[]}
+    all_splits = {}
 
     pathology_dir_all = os.path.join(subject_path, "all")
     if not os.path.exists(pathology_dir_all):
@@ -64,9 +64,7 @@ def split_subject_data(subject_path, subject_name, OUTPUT_DIR, cross_subject=Fal
 
             all_splits[(hand, gesture)] = subsets
 
-    # ---------------------------
     # Copiar cada patología usando el split de ALL
-    # ---------------------------
     for pathology in PATHOLOGIES:
         pathology_dir = os.path.join(subject_path, pathology)
         if not os.path.exists(pathology_dir):
@@ -110,7 +108,7 @@ def split_dataset(ROOT_DIR, OUTPUT_DIR):
     print(f"Sujetos para training/val/test: {train_subjects}")
     print(f"Sujetos hold-out cross-subject: {cross_subjects}")
 
-    # Training/val/test con split por ALL
+    # Training/val/test con split por all
     for subj in train_subjects:
         split_subject_data(
             os.path.join(ROOT_DIR, subj),

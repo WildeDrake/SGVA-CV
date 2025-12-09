@@ -12,7 +12,7 @@ ROOT_preprocessed = "./preprocessed_dataset"
 TOTAL_SUBJECTS = 12
 CROSS_SUBJECT = 2
 TRAIN_SUBJECTS = TOTAL_SUBJECTS - CROSS_SUBJECT
-TOTAL_GESTURES = 6
+TOTAL_GESTURES = 5
 MODO = "train"  # 'train' o 'cross'
 
 # ------------------------------ Utils ------------------------------ #

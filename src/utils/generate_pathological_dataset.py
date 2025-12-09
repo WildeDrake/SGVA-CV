@@ -12,11 +12,10 @@ def save_emg_txt(path, matrix):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = []
     for row in matrix:
-        line = "\t".join(str(int(v)) for v in row) + "\t"  # ← tab extra al final
+        line = "\t".join(str(int(v)) for v in row) + "\t"
         temp.append(line)
     with open(path, "w") as f:
         f.write("\n".join(temp))
-
 
 
 #  Transformaciones patológicas
@@ -157,14 +156,14 @@ def apply_pathology(matrix, pathology_name):
         max_amp = abs_mat.max()
         std_amp = np.std(mat)
         # 2. Pérdida progresiva de unidades motoras
-        #   Reducción fuerte pero irregular (ALS real)
+        #   Reducción fuerte pero irregular
         reduction_curve = np.linspace(
             np.random.uniform(0.7, 0.9),        # inicio casi normal
             np.random.uniform(0.2, 0.4),        # final muy debilitado
             mat.shape[0]
         ).reshape(-1, 1)
         mat = mat * reduction_curve
-        # 3. Fasciculaciones (muy típico de ALS)
+        # 3. Fasciculaciones
         num_fasc = max(3, mat.shape[0] // 40)  # ~2.5% filas
         fasc_positions = np.random.choice(mat.shape[0], num_fasc, replace=False)
         for pos in fasc_positions:
@@ -182,7 +181,7 @@ def apply_pathology(matrix, pathology_name):
             mat[:, c] = np.convolve(mat[:, c], kernel, mode="same")
 
 
-    #  Aplicar modificaciones de Artifact (ruido por movimiento / contacto / línea)
+    #  Aplicar modificaciones de Artifact (ruido por movimiento)
     elif pathology_name == "Artifact":
         # 1. Estadísticas base
         mean_amp = np.mean(np.abs(mat))

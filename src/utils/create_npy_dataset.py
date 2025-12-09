@@ -7,8 +7,6 @@ WINDOW_SIZE = 52
 
 SPLITS = ["training", "validation", "testing", "cross_subject"]
 HANDS = ["LEFT", "RIGHT"]
-
-# Las carpetas que quieres exportar
 PATHOLOGIES = ["Healthy", "DMD", "Neuropathy", "Parkinson", "Stroke", "ALS", "Artifact"]
 
 
