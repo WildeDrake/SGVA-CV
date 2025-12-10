@@ -57,10 +57,10 @@ def main(args):
     device = torch.device("cuda" if (not args.no_cuda and torch.cuda.is_available()) else "cpu")
 
     # ---------------- DataLoaders ---------------- #
-    train_loader = load_split(ROOT_preprocessed, "training", batch_size=args.batch_size, shuffle=True)
-    val_loader = load_split(ROOT_preprocessed, "validation", batch_size=args.batch_size, shuffle=False)
-    test_loader = load_split(ROOT_preprocessed, "testing", batch_size=args.batch_size, shuffle=False)
-    cross_loader = load_split(ROOT_preprocessed, "cross_subject", batch_size=args.batch_size, shuffle=False)
+    train_loader = load_split(ROOT_preprocessed + "/training/Healthy.npy", "training", batch_size=args.batch_size, shuffle=True)
+    val_loader = load_split(ROOT_preprocessed + "/validation/Healthy.npy", "validation", batch_size=args.batch_size, shuffle=False)
+    test_loader = load_split(ROOT_preprocessed + "/testing/Healthy.npy", "testing", batch_size=args.batch_size, shuffle=False)
+    cross_loader = load_split(ROOT_preprocessed + "/cross_subject/Healthy.npy", "cross_subject", batch_size=args.batch_size, shuffle=False)
     
     # ---------------- Modelo y optimizador ---------------- #
     model = DIVA(args).to(device)
