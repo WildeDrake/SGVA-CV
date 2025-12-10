@@ -3,8 +3,8 @@
 # ------------------------------------------------------------
 
 # Variables
-$EPOCHS_TRAIN = 50
-$EPOCHS_FINETUNE = 50
+$EPOCHS_TRAIN = 100
+$EPOCHS_FINETUNE = 100
 $BATCH_SIZE = 256
 $SEED = 0
 
@@ -44,3 +44,8 @@ Set-Location -Path "C:\Users\Awild\OneDrive\Desktop\SGVA-CV"
 git add .
 git commit -m "Modelos entrenados y fine-tune realizados"
 git push
+
+
+
+
+# ./train.ps1

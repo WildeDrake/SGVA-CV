@@ -17,17 +17,17 @@ class TrainerLogger:
                 writer = csv.writer(f)
                 writer.writerow([
                     "epoch",
-                    "train_loss", "train_class_y_loss", "train_acc_y", "train_acc_d",
-                    "val_loss", "val_class_y_loss", "val_acc_y", "val_acc_d",
-                    "cross_acc_y", "cross_acc_d"
+                    "train_loss", "train_class_y_loss", "train_loss_y", "train_loss_d",
+                    "val_loss", "val_class_y_loss", "val_loss_y", "val_loss_d",
+                    "cross_loss_y", "cross_loss_d"
                 ])
 
-    def log_epoch(self, epoch, train_loss, train_class_y_loss, train_acc_y, train_acc_d,
-                  val_loss=None, val_class_y_loss=None, val_acc_y=None, val_acc_d=None,
-                  cross_acc_y=None, cross_acc_d=None):
-        row = [epoch, train_loss, train_class_y_loss, train_acc_y, train_acc_d,
-               val_loss, val_class_y_loss, val_acc_y, val_acc_d,
-               cross_acc_y, cross_acc_d]
+    def log_epoch(self, epoch, train_loss, train_class_y_loss, train_loss_y, train_loss_d,
+                  val_loss=None, val_class_y_loss=None, val_loss_y=None, val_loss_d=None,
+                  cross_loss_y=None, cross_loss_d=None):
+        row = [epoch, train_loss, train_class_y_loss, train_loss_y, train_loss_d,
+               val_loss, val_class_y_loss, val_loss_y, val_loss_d,
+               cross_loss_y, cross_loss_d]
         self.metrics.append(row)
 
         # Guardar en CSV
@@ -43,18 +43,18 @@ class TrainerLogger:
             return
 
         epochs = [m[0] for m in self.metrics]
-        train_acc = [m[2] for m in self.metrics]
-        val_acc = [m[6] for m in self.metrics if m[6] is not None]
-        cross_acc = [m[9] for m in self.metrics if m[9] is not None]
+        train_loss = [m[2] for m in self.metrics]
+        val_loss = [m[6] for m in self.metrics if m[6] is not None]
+        cross_loss = [m[9] for m in self.metrics if m[9] is not None]
 
         plt.figure(figsize=(8,5))
-        plt.plot(epochs, train_acc, label="Train acc")
-        if val_acc:
-            plt.plot(epochs[:len(val_acc)], val_acc, label="Val acc")
-        if cross_acc:
-            plt.plot(epochs[:len(cross_acc)], cross_acc, label="Cross acc")
+        plt.plot(epochs, train_loss, label="Train loss")
+        if val_loss:
+            plt.plot(epochs[:len(val_loss)], val_loss, label="Val loss")
+        if cross_loss:
+            plt.plot(epochs[:len(cross_loss)], cross_loss, label="Cross loss")
         plt.xlabel("Epoch")
-        plt.ylabel("Accuracy")
+        plt.ylabel("Loss")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
