@@ -37,7 +37,8 @@ $ArgsPhase1 = @(
     "--outpath", $TRAIN_BASE_PATH
 )
 
-
+# Ejecución de Python
+py train_diva.py $ArgsPhase1
 
 
 # Ruta del mejor modelo preentrenado (para la FASE 2)
@@ -71,3 +72,16 @@ $ArgsPhase2 = @(
 # Ejecución de Python
 py train_diva.py $ArgsPhase2
     
+# ----------------------------------
+# Git add + commit + push
+# ----------------------------------
+Write-Host "=============================================="
+Write-Host "Committing and pushing changes to Git..."
+Write-Host "=============================================="
+
+Set-Location -Path $GIT_PROJECT_PATH
+git add .
+git commit -m "feat: Entrenamiento base y fine-tuning condicional (Patologías) completados."
+git push
+
+Write-Host "Script completado. Modelos finales guardados en $FINETUNE_CVAE_PATH"

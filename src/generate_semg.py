@@ -2,145 +2,172 @@ import argparse
 import os
 import numpy as np
 import torch
+# No se necesita h5py en esta versión
 from model_diva import DIVA
-from utils.semgdata_loader import load_split, PATHOLOGY_MAP, C_DIM, load_multiple_splits
+from utils.semgdata_loader import load_split, PATHOLOGY_MAP, C_DIM
 
 # -------------------------- Configuración --------------------------
 ROOT_preprocessed = "./preprocessed_dataset"
 TOTAL_GESTURES = 5
-
-# Lista completa de patologías a generar (7 clases)
-PATHOLOGIES_TO_GENERATE = list(PATHOLOGY_MAP.keys())
-# Usamos un solo sujeto sano y sus gestos como base para la generación
 BASE_SUBJECT_NAME = "Healthy" 
 
 # -------------------------- Funciones de Utilidad --------------------------
-
-# Nota: Asumimos que model.encode() fue adaptado para devolver las medias latentes (mu)
-# en tu model_diva.py, ya que esa función no fue proporcionada directamente.
-# Si el modelo no tiene model.encode(), se puede usar la función forward y tomar los zs/zy.
-
 def extract_latents(loader, model, device):
-    """
-    Extrae los latentes zs (Sujeto) y zy (Gesto) y las etiquetas de Gesto (Y) de las señales sanas.
+    """ 
+    Extrae las medias latentes (mu) para zs y zy, agrupadas por Gesto (Y).
+    Esta función NO se modificó durante la optimización de RAM.
     """
     model.eval()
-    all_zs, all_zy, all_y = [], [], []
+    latents_by_gesture = {i: {'zs': [], 'zy': [], 'y': []} for i in range(TOTAL_GESTURES)}
+    
     with torch.no_grad():
         for x, y, d, c in loader: 
             x, y, d, c = x.to(device), y.to(device), d.to(device), c.to(device) 
+            mu_zd_loc, _ = model.qzd(x) 
+            mu_zy_loc, _ = model.qzy(x) 
+            y_labels = y.argmax(dim=1).cpu().numpy()
             
-            # Usaremos los encoders internos para obtener los latentes medios
-            # El forward de DIVA devuelve 12 cosas; necesitamos reestructurar model_diva para
-            # tener un método de encode más limpio. Temporalmente, usaremos forward
-            # y asumimos que los outputs son los latentes muestreados (zd_q, zy_q)
+            for i in range(len(y_labels)):
+                gesture_id = y_labels[i]
+                latents_by_gesture[gesture_id]['zs'].append(mu_zd_loc[i:i+1].cpu().numpy())
+                latents_by_gesture[gesture_id]['zy'].append(mu_zy_loc[i:i+1].cpu().numpy())
+                latents_by_gesture[gesture_id]['y'].append(gesture_id)
+                
+    for i in range(TOTAL_GESTURES):
+        if latents_by_gesture[i]['zs']:
+            latents_by_gesture[i]['zs'] = np.concatenate(latents_by_gesture[i]['zs'], axis=0)
+            latents_by_gesture[i]['zy'] = np.concatenate(latents_by_gesture[i]['zy'], axis=0)
+            latents_by_gesture[i]['y'] = np.array(latents_by_gesture[i]['y'])
+        else:
+            latents_by_gesture[i]['zs'] = np.empty((0, model.zd_dim), dtype=np.float32)
+            latents_by_gesture[i]['zy'] = np.empty((0, model.zy_dim), dtype=np.float32)
+            latents_by_gesture[i]['y'] = np.empty(0, dtype=np.int64)
             
-            # Nota: Esto es un workaround. Lo ideal es usar mu_zd, mu_zy. 
-            # Los latentes muestreados aquí son zd_q, zx_q, zy_q.
-            *_, qzd, pzd, zd_q, qzx, pzx, zx_q, qzy, pzy, zy_q = model.forward(d, x, y, c)
+    return latents_by_gesture
 
-            # Usamos los latentes muestreados (zd_q, zy_q) como representación de la base
-            all_zs.append(zd_q.cpu().numpy())
-            all_zy.append(zy_q.cpu().numpy())
-            all_y.append(y.argmax(dim=1).cpu().numpy()) # Etiqueta de Gesto (Y)
-            
-    return np.concatenate(all_zs, axis=0), np.concatenate(all_zy, axis=0), np.concatenate(all_y, axis=0)
 
-def generate_signals(model, device, base_zs, base_zy, base_y, target_pathology_id, num_samples):
+def generate_signals(model, device, latents_by_gesture, target_pathology_id, num_samples, gen_batch_size):
     """
-    Genera nuevas señales condicionales y sus etiquetas de Gesto y Patología.
+    Genera señales con mini-batching y balanceo forzado por Gesto.
+    (La función de guardado en RAM, pero optimizada para 1 canal).
     """
     model.eval()
-    all_x_generated = []
-    all_y_labels = [] # Lista para guardar la etiqueta de Gesto
-    all_c_labels = [] # Lista para guardar la etiqueta de Patología
+    all_x_generated, all_y_labels, all_c_labels = [], [], [] 
 
-    # Crear el vector de Condición C (el mismo para todo el lote)
-    C_tensor = torch.zeros(1, C_DIM).to(device)
-    C_tensor[0, target_pathology_id] = 1.0
+    # Inicialización de C_tensor_base (corregida)
+    C_tensor_base = torch.zeros(1, C_DIM).to(device)
+    C_tensor_base[0, target_pathology_id] = 1.0
     
-    # Para la generación, elegimos muestras aleatorias de los latentes de base
-    indices = np.random.choice(len(base_zs), size=num_samples, replace=True)
+    # ... (Lógica de muestreo y batching idéntica a generate_signals_RAM_test) ...
     
-    # Convertir a tensores y mover a device
-    zs_sample = torch.tensor(base_zs[indices], dtype=torch.float32).to(device)
-    zy_sample = torch.tensor(base_zy[indices], dtype=torch.float32).to(device)
+    samples_per_gesture = int(num_samples / TOTAL_GESTURES)
+    total_generated = samples_per_gesture * TOTAL_GESTURES
     
-    # Obtener las etiquetas de Gesto (Y) correspondientes a los latentes muestreados
-    y_labels_batch = base_y[indices] 
+    # print(f"    Total generado (balanceado): {total_generated}. Muestras por Gesto: {samples_per_gesture}.")
+    
+    num_batches = int(np.ceil(total_generated / gen_batch_size))
+    samples_remaining_by_gesture = {i: samples_per_gesture for i in range(TOTAL_GESTURES)}
 
-    # Samplear ruido (zx) de una distribución Normal estándar
-    zx_dim = model.zx_dim
-    zx_sample = torch.randn(num_samples, zx_dim).to(device)
+    print(f"    Dividiendo {total_generated} muestras en {num_batches} lotes de tamaño {gen_batch_size}...")
 
-    # Replicar el tensor C para todas las muestras en el lote
-    C_batch = C_tensor.repeat(num_samples, 1)
+    current_idx = 0
+    for i in range(num_batches):
+        batch_size_needed = min(gen_batch_size, total_generated - current_idx)
 
-    with torch.no_grad():
-        # Ejecutar el Decoder
-        x_gen = model.px(zs_sample, zx_sample, zy_sample, C_batch)
+        zs_batch, zy_batch, y_batch = [], [], []
+        samples_per_gesture_in_batch_target = int(np.ceil(batch_size_needed / TOTAL_GESTURES))
         
-        # Guardar la señal generada
-        all_x_generated.append(x_gen.cpu().numpy())
+        for gesture_id in range(TOTAL_GESTURES):
+            num_to_sample = min(samples_per_gesture_in_batch_target, samples_remaining_by_gesture[gesture_id])
+            if num_to_sample <= 0: continue 
 
-        # Guardar las etiquetas de Gesto (Y) y Patología (C)
+            base_z = latents_by_gesture[gesture_id]
+            N_base_samples = len(base_z['zs'])
+            if N_base_samples == 0: continue
+            
+            indices = np.random.choice(N_base_samples, size=num_to_sample, replace=True)
+            
+            zs_batch.append(base_z['zs'][indices])
+            zy_batch.append(base_z['zy'][indices])
+            y_batch.append(base_z['y'][indices])
+            
+            samples_remaining_by_gesture[gesture_id] -= num_to_sample
+
+        if not zs_batch: break
+            
+        zs_sample = torch.tensor(np.concatenate(zs_batch, axis=0), dtype=torch.float32).to(device)
+        zy_sample = torch.tensor(np.concatenate(zy_batch, axis=0), dtype=torch.float32).to(device)
+        y_labels_batch = np.concatenate(y_batch, axis=0)
+        
+        final_batch_size = zs_sample.size(0)
+
+        zx_dim = model.zx_dim
+        zx_sample = torch.randn(final_batch_size, zx_dim).to(device)
+        C_batch = C_tensor_base.repeat(final_batch_size, 1)
+
+        with torch.no_grad():
+            x_gen = model.px(zs_sample, zx_sample, zy_sample, C_batch)
+        
+        # Guardado en RAM (Optimizada a 1 canal)
+        x_gen_1ch = x_gen.mean(dim=1, keepdim=True) 
+        all_x_generated.append(x_gen_1ch.cpu().numpy())
+        
         all_y_labels.append(y_labels_batch)
-        all_c_labels.append(np.full(num_samples, target_pathology_id, dtype=np.int64))
+        all_c_labels.append(np.full(final_batch_size, target_pathology_id, dtype=np.int64))
 
+        current_idx += final_batch_size
+        if device.type == 'cuda': torch.cuda.empty_cache()
+            
+    # PASO FINAL: CONCATENACIÓN MASIVA EN RAM (PUNTO DE FALLO POTENCIAL)
+    # print("--- CONCATENANDO EN RAM ---") # Quitamos los logs de alerta
     X_gen = np.concatenate(all_x_generated, axis=0)
     Y_labels = np.concatenate(all_y_labels, axis=0)
     C_labels = np.concatenate(all_c_labels, axis=0)
-
-    # 🚨 Devolvemos la señal generada y las dos etiquetas
-    return X_gen, Y_labels, C_labels
+    # print("--- CONCATENACIÓN EXITOSA. Guardando... ---")
+    
+    return X_gen, Y_labels, C_labels, current_idx
 
 
 # -------------------------- Main Execution --------------------------
 def main_generation(args):
     device = torch.device("cuda" if (not args.no_cuda and torch.cuda.is_available()) else "cpu")
     
-    # 1. Cargar el modelo Fine-Tuned (el mejor o el último checkpoint)
+    # 1. Cargar el modelo Fine-Tuned
     print(f"Cargando modelo Fine-Tuned desde: {args.model_path}")
     model = DIVA(args).to(device)
-    # Se añade el 'ft-mode' para que DIVA se inicialice correctamente (aunque no sea necesario en la generación)
-    model.ft_mode = 'finetune' 
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
     # 2. Extraer Latentes de Base (Sanos)
+    print("Extrayendo latentes de la base Healthy y agrupando por Gesto...")
     base_loader = load_split(ROOT_preprocessed, "training", BASE_SUBJECT_NAME, batch_size=args.batch_size, shuffle=False)
-    base_zs, base_zy, base_y = extract_latents(base_loader, model, device)
+    latents_by_gesture = extract_latents(base_loader, model, device)
     
-    # 3. Preparar directorio de salida
+    N_base_total = sum(len(d['zs']) for d in latents_by_gesture.values())
+    
     os.makedirs(args.generated_dir, exist_ok=True)
     
-    print(f"\nIniciando Generación Condicional de {len(PATHOLOGIES_TO_GENERATE)} Patologías...")
-
-    # Creamos un contenedor único para todas las señales y etiquetas
-    X_all, Y_all, C_all = [], [], []
+    print(f"\nIniciando Generación Condicional de {len(PATHOLOGY_MAP)} Patologías...")
 
     # 4. Bucle de Generación por Patología
     for pat_name, pat_id in PATHOLOGY_MAP.items():
         print(f"  → Generando señales para: {pat_name} (ID: {pat_id})")
         
-        num_samples = len(base_zs) * 10
+        num_samples = int(N_base_total * args.gen_factor)
+        output_path = os.path.join(args.generated_dir, f"generated_{pat_name}.npy") 
         
-        generated_signals, generated_y, generated_c = generate_signals(
-            model, device, base_zs, base_zy, base_y, pat_id, num_samples
+        # 🚨 LLamada a la función de generación (sin el sufijo _RAM_test)
+        X_gen, Y_labels, C_labels, total_generated = generate_signals(
+            model, device, latents_by_gesture, pat_id, num_samples, args.gen_batch_size
         )
         
-        # 🚨 GUARDAR CADA GENERACIÓN COMO UN ÚNICO ARCHIVO .NPY CON DATOS Y ETIQUETAS
-        output_path = os.path.join(args.generated_dir, f"generated_{pat_name}.npy")
+        # 🚨 GUARDADO FINAL USANDO NUMPY
         np.save(
             output_path, 
-            {
-                "X": generated_signals, # Señales generadas
-                "Y": generated_y,       # Etiqueta de Gesto (5 Clases)
-                "C": generated_c        # Etiqueta de Patología (7 Clases)
-            }, 
+            {"X": X_gen, "Y": Y_labels, "C": C_labels}, 
             allow_pickle=True
         )
-        print(f"  → Guardado {generated_signals.shape[0]} muestras en {output_path}")
+        print(f"  → Guardado {total_generated} muestras en {output_path}")
 
     print("\n¡Generación Condicional Completada!")
 
@@ -150,10 +177,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Conditional sEMG Generation (DIVA)")
     parser.add_argument('--model-path', type=str, default='./saved_model/diva_best_seed0.model',
                         help="Ruta al modelo DIVA Fine-Tuned (.model)")
-    parser.add_argument('--generated-dir', type=str, default='./generated_bank',
+    parser.add_argument('--generated-dir', type=str, default='./generated_data', # Cambio de carpeta
                         help="Ruta para guardar las señales generadas (.npy)")
     parser.add_argument('--batch-size', type=int, default=512)
     parser.add_argument('--no-cuda', action='store_true', default=False)
+    
+    parser.add_argument('--gen-factor', type=float, default=1.5,
+                        help="Factor multiplicador para el número de muestras a generar.")
+    parser.add_argument('--gen-batch-size', type=int, default=256, 
+                        help="Tamaño de lote usado durante la generación (mini-batch).")
     
     # Parámetros del modelo (deben coincidir con el entrenamiento)
     parser.add_argument('--c-dim', type=int, default=C_DIM)

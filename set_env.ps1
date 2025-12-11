@@ -16,4 +16,4 @@ python -m pip install --upgrade pip setuptools wheel
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
 
 # Instalar Librerías necesarias
-pip install numpy scipy pandas matplotlib openpyxl
+pip install numpy scipy pandas matplotlib openpyxl scikit-learn
